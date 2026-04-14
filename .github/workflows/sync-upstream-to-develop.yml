@@ -60,17 +60,42 @@ jobs:
           set -e
 
           if [ "$MERGE_EXIT" -ne 0 ]; then
-            echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "develop_sha=$BEFORE_SHA" >> "$GITHUB_OUTPUT"
-            {
-              echo "## Upstream Sync Conflict"
-              echo "Automatic sync failed with merge conflicts in these files:"
-              git diff --name-only --diff-filter=U | sed 's/^/- /'
-              echo
-              echo "Resolve conflicts on branch develop and re-run this workflow."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
+            CONFLICT_FILES=$(git diff --name-only --diff-filter=U || true)
+
+            # Known recurring conflicts where upstream should win.
+            AUTO_THEIRS_FILES="CONTRIBUTING.md package-lock.json uv.lock yarn.lock pnpm-lock.yaml Pipfile.lock poetry.lock"
+
+            for f in $AUTO_THEIRS_FILES; do
+              if echo "$CONFLICT_FILES" | grep -qx "$f"; then
+                STAGES=$(git ls-files -u -- "$f" | awk '{print $3}' | sort -u | tr '\n' ' ')
+
+                if echo "$STAGES" | grep -q "3"; then
+                  # Stage 3 exists: take upstream version.
+                  git checkout --theirs -- "$f"
+                  git add -- "$f"
+                else
+                  # No stage 3 means file is deleted in upstream; keep deletion.
+                  git rm -f -- "$f"
+                fi
+              fi
+            done
+
+            REMAINING=$(git diff --name-only --diff-filter=U || true)
+            if [ -z "$REMAINING" ]; then
+              git commit -m "chore: auto-resolve upstream sync conflicts"
+            else
+              echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              echo "develop_sha=$BEFORE_SHA" >> "$GITHUB_OUTPUT"
+              {
+                echo "## Upstream Sync Conflict"
+                echo "Automatic sync could not resolve all conflicts. Remaining files:"
+                echo "$REMAINING" | sed 's/^/- /'
+                echo
+                echo "Resolve conflicts on branch develop and re-run this workflow."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
           fi
 
           AFTER_SHA=$(git rev-parse HEAD)
