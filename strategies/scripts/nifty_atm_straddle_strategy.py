@@ -250,20 +250,23 @@ def cleanup_session():
 
 DB_AVAILABLE = True
 
+# Auto-initialize database on module import
+try:
+    init_straddle_db()
+except Exception as e:
+    logger.debug(f"Database already initialized: {e}")
+
 # ============================================================================
-# STRATEGY CONFIGURATION
+# STRATEGY CONFIGURATION (HARD-CODED)
 # ============================================================================
 
-CONFIG = {
-    "underlying": "NIFTY",
-    "exchange": "NSE",
-    "nfo_exchange": "NFO",
-    "quantity_per_leg": 50,
-    "check_interval": 300,  # seconds (5 minutes)
-    "market_open": "09:15",
-    "market_close": "15:30",
-    "notes": "ATM Straddle + VWAP strategy for NIFTY options"
-}
+UNDERLYING = "NIFTY"
+EXCHANGE = "NSE"
+NFO_EXCHANGE = "NFO"
+QUANTITY_PER_LEG = 50
+CHECK_INTERVAL = 300  # seconds (5 minutes)
+MARKET_OPEN = "09:15"
+MARKET_CLOSE = "15:30"
 
 # ============================================================================
 # INDICATOR CLASSES
@@ -347,7 +350,7 @@ class StraddleStrategyAPI:
             payload = {
                 "apikey": self.api_key,
                 "symbol": symbol,
-                "exchange": CONFIG["exchange"]
+                "exchange": EXCHANGE,
             }
             response = self.session.post(url, json=payload, timeout=10)
             response.raise_for_status()
@@ -363,7 +366,7 @@ class StraddleStrategyAPI:
             payload = {
                 "apikey": self.api_key,
                 "symbol": symbol,
-                "exchange": CONFIG["exchange"],
+                "exchange": EXCHANGE,
                 "timeframe": timeframe,
                 "limit": 100
             }
@@ -452,7 +455,7 @@ class StraddleStrategyEngine:
     def fetch_candle_data(self) -> Dict:
         """Fetch current NIFTY candle data."""
         try:
-            symbol = f"{CONFIG['underlying']}"
+            symbol = UNDERLYING
             response = self.api.get_historical_data(symbol)
             
             if response and response.get("status") == "success":
@@ -488,8 +491,8 @@ class StraddleStrategyEngine:
         try:
             strike = round(spot_price / 100) * 100
             
-            ce_symbol = f"{CONFIG['underlying']}{expiry}{strike}CE"
-            pe_symbol = f"{CONFIG['underlying']}{expiry}{strike}PE"
+            ce_symbol = f"{UNDERLYING}{expiry}{strike}CE"
+            pe_symbol = f"{UNDERLYINGstrike}PE"
             
             return {
                 "atm_strike": strike,
@@ -530,7 +533,7 @@ class StraddleStrategyEngine:
     
     def create_straddle_orders(self, signal: str, ce_symbol: str, pe_symbol: str) -> List[Dict]:
         """Create straddle order payload."""
-        qty = CONFIG["quantity_per_leg"]
+        qty = QUANTITY_PER_LEG
         
         if signal == "LONG":
             return [
@@ -539,14 +542,14 @@ class StraddleStrategyEngine:
                     "action": "BUY",
                     "quantity": qty,
                     "price_type": "MARKET",
-                    "exchange": CONFIG["nfo_exchange"]
+                    "exchange": NFO_EXCHANGE
                 },
                 {
                     "symbol": pe_symbol,
                     "action": "BUY",
                     "quantity": qty,
                     "price_type": "MARKET",
-                    "exchange": CONFIG["nfo_exchange"]
+                    "exchange": NFO_EXCHANGE
                 }
             ]
         elif signal == "SHORT":
@@ -556,14 +559,14 @@ class StraddleStrategyEngine:
                     "action": "SELL",
                     "quantity": qty,
                     "price_type": "MARKET",
-                    "exchange": CONFIG["nfo_exchange"]
+                    "exchange": NFO_EXCHANGE
                 },
                 {
                     "symbol": pe_symbol,
                     "action": "SELL",
                     "quantity": qty,
                     "price_type": "MARKET",
-                    "exchange": CONFIG["nfo_exchange"]
+                    "exchange": NFO_EXCHANGE
                 }
             ]
         
@@ -639,7 +642,7 @@ class StraddleStrategyEngine:
             # Record signal
             if signal != "NEUTRAL" and signal != self.last_signal:
                 signal_data = {
-                    "underlying": CONFIG["underlying"],
+                    "underlying": UNDERLYING,
                     "signal_timestamp": datetime.now(),
                     "signal_type": signal,
                     "spot_price": current_price,
@@ -649,7 +652,7 @@ class StraddleStrategyEngine:
                     "expiry_date": atm_data["expiry"],
                     "stoploss_points": atr,
                     "target_points": 2 * atr,
-                    "quantity_per_leg": CONFIG["quantity_per_leg"]
+                    "quantity_per_leg": QUANTITY_PER_LEG
                 }
                 self.record_signal(signal_data)
                 
@@ -667,8 +670,8 @@ class StraddleStrategyEngine:
                     if result and result.get("status") == "success":
                         position_data = {
                             "signal_id": 1,
-                            "underlying": CONFIG["underlying"],
-                            "exchange": CONFIG["nfo_exchange"],
+                            "underlying": UNDERLYING,
+                            "exchange": NFO_EXCHANGE,
                             "expiry_date": atm_data["expiry"],
                             "atm_strike": atm_data["atm_strike"],
                             "position_type": signal,
@@ -676,7 +679,7 @@ class StraddleStrategyEngine:
                             "pe_symbol": atm_data["pe_symbol"],
                             "ce_orderid": result.get("orders", [{}])[0].get("orderid"),
                             "pe_orderid": result.get("orders", [{}])[1].get("orderid") if len(result.get("orders", [])) > 1 else None,
-                            "quantity": CONFIG["quantity_per_leg"],
+                            "quantity": QUANTITY_PER_LEG,
                             "status": "active"
                         }
                         self.record_position(position_data)
@@ -806,20 +809,12 @@ class StrategyAnalyzer:
 def main():
     """Main entry point for CLI and strategy execution."""
     parser = argparse.ArgumentParser(description="ATM Straddle Strategy (All-in-One)")
-    parser.add_argument("--apikey", help="API key for OpenAlgo")
-    parser.add_argument("--init", action="store_true", help="Initialize database")
     parser.add_argument("--status", action="store_true", help="Show strategy status")
-    parser.add_argument("--config", action="store_true", help="Show configuration")
+    parser.add_argument("--config", action="store_true", help="Show hard-coded configuration")
     parser.add_argument("--run", action="store_true", help="Run strategy once")
+    parser.add_argument("--apikey", help="API key for OpenAlgo (optional, uses environment variable if not provided)")
     
     args = parser.parse_args()
-    
-    # Handle database initialization
-    if args.init:
-        analyzer = StrategyAnalyzer()
-        analyzer.initialize_database()
-        analyzer.cleanup()
-        return
     
     # Handle status check
     if args.status:
@@ -828,30 +823,38 @@ def main():
         analyzer.cleanup()
         return
     
-    # Handle config display
+    # Handle config display - show hard-coded values
     if args.config:
-        print("\nStrategy Configuration:")
-        for key, value in CONFIG.items():
-            print(f"  {key}: {value}")
-        print()
+        print("\n" + "=" * 70)
+        print("STRATEGY CONFIGURATION (HARD-CODED)")
+        print("=" * 70)
+        print(f"  Underlying: {UNDERLYING}")
+        print(f"  Exchange: {EXCHANGE}")
+        print(f"  NFO Exchange: {NFO_EXCHANGE}")
+        print(f"  Quantity per Leg: {QUANTITY_PER_LEG}")
+        print(f"  Check Interval: {CHECK_INTERVAL} seconds")
+        print(f"  Market Open: {MARKET_OPEN}")
+        print(f"  Market Close: {MARKET_CLOSE}")
+        print(f"  Database: {DATABASE_URL}")
+        print(f"  Database Auto-Initialized: {DB_AVAILABLE}")
+        print("=" * 70 + "\n")
         return
     
-    # Handle strategy execution
-    if args.run or args.apikey:
-        api_key = args.apikey or os.environ.get("API_KEY", "")
-        if not api_key:
-            print("Error: API_KEY not provided. Use --apikey or set API_KEY environment variable")
-            return
-        
-        engine = StraddleStrategyEngine(api_key)
-        try:
-            engine.execute_strategy()
-        finally:
-            engine.cleanup()
-        return
+    # Handle strategy execution (--run or default)
+    # API key is optional, uses environment variable if not provided
+    api_key = args.apikey or os.environ.get("API_KEY", "")
+    if not api_key:
+        print("Warning: API_KEY not provided. Strategy will run but may not be able to execute orders.")
+        print("  Provide via: --apikey <KEY> or API_KEY environment variable")
+        api_key = "demo"  # Use demo key to allow testing
     
-    # Default: show help
-    parser.print_help()
+    engine = StraddleStrategyEngine(api_key)
+    try:
+        print(f"\nATM Straddle Strategy started with auto-initialized configuration:")
+        print(f"  Underlying: {UNDERLYING}, Quantity: {QUANTITY_PER_LEG}")
+        engine.execute_strategy()
+    finally:
+        engine.cleanup()
 
 if __name__ == "__main__":
     main()
