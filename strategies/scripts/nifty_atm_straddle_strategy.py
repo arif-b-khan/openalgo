@@ -32,16 +32,223 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Try to import database models
-try:
-    from database.straddle_strategy_db import (
-        get_session, cleanup_session, init_straddle_db,
-        StraddleSignal, StraddlePosition, StraddleTrade, StrategyDailyMetrics
+# Database imports
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, Boolean, Index, desc
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy.pool import NullPool
+
+# ============================================================================
+# DATABASE CONFIGURATION & MODELS
+# ============================================================================
+
+# Database path
+DATABASE_DIR = "db"
+if not os.path.exists(DATABASE_DIR):
+    os.makedirs(DATABASE_DIR)
+
+DATABASE_PATH = os.path.join(DATABASE_DIR, "straddle_strategy.db")
+DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
+
+# Create engine with NullPool (fresh connection per request, prevents concurrency issues)
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    poolclass=NullPool,
+    echo=False
+)
+
+# Session factory with scoping for thread safety
+SessionLocal = scoped_session(sessionmaker(bind=engine, expire_on_commit=False))
+
+# Base class for all models
+Base = declarative_base()
+
+
+class StraddleSignal(Base):
+    """
+    Tracking VWAP-based trading signals and technical indicators at signal generation time.
+    """
+    __tablename__ = "straddle_signals"
+    
+    id = Column(Integer, primary_key=True)
+    underlying = Column(String(20), nullable=False)
+    exchange = Column(String(10), nullable=False, default="NFO")
+    
+    spot_price = Column(Float, nullable=False)
+    vwap = Column(Float, nullable=False)
+    atr_14 = Column(Float, nullable=False)
+    
+    signal_type = Column(String(10), nullable=False)
+    previous_signal = Column(String(10), nullable=True)
+    
+    atm_strike = Column(Float, nullable=False)
+    expiry_date = Column(String(20), nullable=False)
+    
+    stoploss_points = Column(Float, nullable=False)
+    target_points = Column(Float, nullable=False)
+    quantity_per_leg = Column(Integer, nullable=False)
+    
+    signal_timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index("idx_underlying_timestamp", "underlying", "signal_timestamp"),
+        Index("idx_signal_type", "signal_type"),
     )
-    DB_AVAILABLE = True
-except ImportError:
-    logger.warning("Database models not available, tracking disabled")
-    DB_AVAILABLE = False
+
+
+class StraddlePosition(Base):
+    """
+    Tracks the currently active straddle position (one per signal).
+    """
+    __tablename__ = "straddle_positions"
+    
+    id = Column(Integer, primary_key=True)
+    signal_id = Column(Integer, nullable=False)
+    
+    underlying = Column(String(20), nullable=False)
+    exchange = Column(String(10), nullable=False)
+    expiry_date = Column(String(20), nullable=False)
+    atm_strike = Column(Float, nullable=False)
+    
+    position_type = Column(String(10), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    
+    ce_symbol = Column(String(50), nullable=False)
+    pe_symbol = Column(String(50), nullable=False)
+    ce_orderid = Column(String(50), nullable=True)
+    pe_orderid = Column(String(50), nullable=True)
+    
+    ce_entry_price = Column(Float, nullable=True)
+    pe_entry_price = Column(Float, nullable=True)
+    entry_timestamp = Column(DateTime, nullable=True)
+    
+    status = Column(String(20), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index("idx_signal_id", "signal_id"),
+        Index("idx_underlying_active", "underlying", "is_active"),
+        Index("idx_position_status", "status"),
+    )
+
+
+class StraddleTrade(Base):
+    """
+    Records completed trades (entry to exit).
+    """
+    __tablename__ = "straddle_trades"
+    
+    id = Column(Integer, primary_key=True)
+    signal_id = Column(Integer, nullable=False)
+    position_id = Column(Integer, nullable=True)
+    
+    underlying = Column(String(20), nullable=False)
+    exchange = Column(String(10), nullable=False)
+    
+    trade_type = Column(String(10), nullable=False)
+    
+    entry_date = Column(String(20), nullable=False)
+    entry_time = Column(DateTime, nullable=False)
+    entry_ce_price = Column(Float, nullable=False)
+    entry_pe_price = Column(Float, nullable=False)
+    entry_total_premium = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    
+    exit_time = Column(DateTime, nullable=True)
+    exit_ce_price = Column(Float, nullable=True)
+    exit_pe_price = Column(Float, nullable=True)
+    exit_total_premium = Column(Float, nullable=True)
+    
+    premium_paid = Column(Float, nullable=False)
+    premium_received = Column(Float, nullable=True)
+    realized_pnl = Column(Float, nullable=True)
+    realized_pnl_percent = Column(Float, nullable=True)
+    
+    status = Column(String(20), nullable=False)
+    exit_reason = Column(String(50), nullable=True)
+    
+    trade_date = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index("idx_trade_entry_time", "entry_time"),
+        Index("idx_underlying_type", "underlying", "trade_type"),
+        Index("idx_trade_status", "status"),
+        Index("idx_signal_id_trade", "signal_id"),
+    )
+
+
+class StrategyDailyMetrics(Base):
+    """
+    Daily summary of strategy performance.
+    """
+    __tablename__ = "strategy_daily_metrics"
+    
+    id = Column(Integer, primary_key=True)
+    
+    trade_date = Column(String(20), nullable=False, unique=True)
+    underlying = Column(String(20), nullable=False, default="NIFTY")
+    
+    total_trades = Column(Integer, nullable=False, default=0)
+    completed_trades = Column(Integer, nullable=False, default=0)
+    winning_trades = Column(Integer, nullable=False, default=0)
+    losing_trades = Column(Integer, nullable=False, default=0)
+    
+    total_realized_pnl = Column(Float, nullable=False, default=0.0)
+    avg_trade_pnl = Column(Float, nullable=True)
+    best_trade_pnl = Column(Float, nullable=True)
+    worst_trade_pnl = Column(Float, nullable=True)
+    
+    max_loss = Column(Float, nullable=True)
+    max_gain = Column(Float, nullable=True)
+    max_drawdown = Column(Float, nullable=True)
+    
+    win_rate = Column(Float, nullable=True)
+    profit_factor = Column(Float, nullable=True)
+    
+    long_trades = Column(Integer, nullable=False, default=0)
+    short_trades = Column(Integer, nullable=False, default=0)
+    long_pnl = Column(Float, nullable=False, default=0.0)
+    short_pnl = Column(Float, nullable=False, default=0.0)
+    
+    opening_price = Column(Float, nullable=True)
+    closing_price = Column(Float, nullable=True)
+    daily_range = Column(Float, nullable=True)
+    avg_atr = Column(Float, nullable=True)
+    avg_vwap = Column(Float, nullable=True)
+    
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    notes = Column(String(500), nullable=True)
+    
+    __table_args__ = (
+        Index("idx_daily_metrics_date", "trade_date"),
+    )
+
+
+def init_straddle_db():
+    """Initialize the straddle strategy database."""
+    Base.metadata.create_all(engine)
+    return engine
+
+
+def get_session():
+    """Get a database session."""
+    return SessionLocal()
+
+
+def cleanup_session():
+    """Clean up the session (call in teardown)."""
+    SessionLocal.remove()
+
+
+DB_AVAILABLE = True
 
 # ============================================================================
 # STRATEGY CONFIGURATION
@@ -441,7 +648,8 @@ class StraddleStrategyEngine:
                     "atm_strike": atm_data["atm_strike"],
                     "expiry_date": atm_data["expiry"],
                     "stoploss_points": atr,
-                    "target_points": 2 * atr
+                    "target_points": 2 * atr,
+                    "quantity_per_leg": CONFIG["quantity_per_leg"]
                 }
                 self.record_signal(signal_data)
                 
@@ -458,15 +666,18 @@ class StraddleStrategyEngine:
                     
                     if result and result.get("status") == "success":
                         position_data = {
-                            "signal_id": 1,  # Would be retrieved from DB in production
+                            "signal_id": 1,
+                            "underlying": CONFIG["underlying"],
+                            "exchange": CONFIG["nfo_exchange"],
+                            "expiry_date": atm_data["expiry"],
+                            "atm_strike": atm_data["atm_strike"],
                             "position_type": signal,
                             "ce_symbol": atm_data["ce_symbol"],
                             "pe_symbol": atm_data["pe_symbol"],
                             "ce_orderid": result.get("orders", [{}])[0].get("orderid"),
                             "pe_orderid": result.get("orders", [{}])[1].get("orderid") if len(result.get("orders", [])) > 1 else None,
                             "quantity": CONFIG["quantity_per_leg"],
-                            "status": "active",
-                            "created_at": datetime.now()
+                            "status": "active"
                         }
                         self.record_position(position_data)
                         logger.info(f"Orders placed: {result}")
@@ -537,7 +748,6 @@ class StrategyAnalyzer:
             return []
         
         try:
-            from sqlalchemy import desc
             signals = self.session.query(StraddleSignal).order_by(
                 desc(StraddleSignal.signal_timestamp)
             ).limit(limit).all()
