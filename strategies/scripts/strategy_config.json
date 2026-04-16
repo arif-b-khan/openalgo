@@ -1,0 +1,8 @@
+{
+  "underlying": "NIFTY",
+  "exchange": "NSE",
+  "nfo_exchange": "NFO",
+  "quantity_per_leg": 50,
+  "check_interval": 300,
+  "notes": "ATM Straddle + VWAP strategy for NIFTY. Uses 5-min candles, ATR(14), and 2:1 risk/reward ratio."
+}
