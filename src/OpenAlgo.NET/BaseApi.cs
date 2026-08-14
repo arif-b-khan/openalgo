@@ -1,9 +1,35 @@
+using System.Globalization;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace OpenAlgo.NET;
+
+internal sealed class NumberOrStringConverter : JsonConverter<string>
+{
+    public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        return reader.TokenType switch
+        {
+            JsonTokenType.String => reader.GetString(),
+            JsonTokenType.Number => reader.GetDecimal().ToString(CultureInfo.InvariantCulture),
+            JsonTokenType.Null => null,
+            _ => throw new JsonException($"Expected a string or number but found {reader.TokenType}.")
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, string? value, JsonSerializerOptions options)
+    {
+        if (value == null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStringValue(value);
+    }
+}
 
 /// <summary>
 /// Custom snake_case naming policy for JSON serialization (compatible with .NET 6/7/8).
@@ -66,6 +92,11 @@ public abstract class BaseApi
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         WriteIndented = false
     };
+
+    static BaseApi()
+    {
+        JsonOptions.Converters.Add(new NumberOrStringConverter());
+    }
 
     /// <summary>
     /// Initializes a new instance of the BaseApi class.
