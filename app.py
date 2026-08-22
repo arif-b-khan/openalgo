@@ -437,13 +437,6 @@ def create_app():
         # Exempt broker callback endpoints from CSRF protection (OAuth callbacks from external providers)
         csrf.exempt(app.view_functions["brlogin.broker_callback"])
 
-        # Exempt Samco 2FA setup endpoints from CSRF (JSON API calls from React frontend)
-        csrf.exempt(app.view_functions["brlogin.samco_generate_otp"])
-        csrf.exempt(app.view_functions["brlogin.samco_generate_secret"])
-        csrf.exempt(app.view_functions["brlogin.samco_save_secret"])
-        csrf.exempt(app.view_functions["brlogin.samco_ip_status"])
-        csrf.exempt(app.view_functions["brlogin.samco_update_ip"])
-
         # auth.logout is deliberately NOT exempt. It is not "safe" in the CSRF
         # sense: it revokes the broker token, publishes CACHE_INVALIDATE_ALL
         # (tearing down the shared WebSocket feed), clears every device's
@@ -577,7 +570,7 @@ def create_app():
 
     @app.errorhandler(404)
     def not_found_error(error):
-        from flask import request, session
+        from flask import jsonify, request, session
 
         from database.traffic_db import Error404Tracker
         from utils.ip_helper import get_real_ip
@@ -606,8 +599,22 @@ def create_app():
         if not is_authenticated and not path.startswith(safe_prefixes):
             Error404Tracker.track_404(client_ip, path)
 
-        # Serve React app (React Router handles 404)
-        return serve_react_app()
+        # Namespaces that must never answer with the React shell. serve_react_app
+        # returns a 200 Response, and a Flask error handler keeps the status of a
+        # Response it returns, so every unmatched path used to answer 200
+        # text/html: an API client that mistyped an endpoint saw response.ok pass
+        # with an unparseable body, and a request for a stale content-hashed
+        # chunk got HTML that the browser then tried to execute as JavaScript,
+        # white-screening the SPA with "Unexpected token '<'" instead of failing
+        # cleanly. React routes without a Flask endpoint still fall through to
+        # the shell, which is deliberate.
+        if path.startswith(("/api/", "/flow/api/", "/flow/webhook/")):
+            return jsonify({"status": "error", "message": "Not found", "path": path}), 404
+
+        if path.startswith(("/assets/", "/static/")) or "." in path.rsplit("/", 1)[-1]:
+            return "Not Found", 404
+
+        return serve_react_app(), 404
 
     @app.errorhandler(500)
     def internal_server_error(e):
@@ -810,6 +817,20 @@ def setup_environment(app):
                 restore_order_update_watches()
             except Exception:
                 logger.exception("Failed to restore Flow order-update watches")
+
+            try:
+                from services.flow_price_monitor_service import restore_price_alerts
+
+                restore_price_alerts()
+            except Exception:
+                logger.exception("Failed to restore Flow price alerts")
+
+            try:
+                from services.flow_scheduler_service import reconcile_scheduler_jobs
+
+                reconcile_scheduler_jobs()
+            except Exception:
+                logger.exception("Failed to reconcile Flow scheduler jobs")
 
             try:
                 from services.historify_scheduler_service import init_historify_scheduler
